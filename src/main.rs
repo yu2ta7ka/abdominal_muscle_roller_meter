@@ -7,8 +7,7 @@ use cortex_m_rt::entry;
 use stm32f4xx_hal as hal;
 
 use crate::hal::{
-    delay::Delay, gpio::*, i2c::I2c, prelude::*, serial::config::Config, serial::Serial, spi::*,
-    stm32,
+    gpio::*, i2c::I2c, prelude::*, serial::config::Config, serial::Serial, spi::*, stm32,
 };
 
 use core::fmt::Write; // for pretty formatting of the serial output
@@ -43,6 +42,68 @@ impl core::fmt::Display for Direction {
             Direction::Pull => write!(f, "Pull"),
             Direction::Rest => write!(f, "Rest"),
         }
+    }
+}
+
+pub struct AbMuCalc {
+    distance: [u16; 4],
+    past_direct: Direction,
+    corrent_direct: Direction,
+}
+
+impl AbMuCalc {
+    pub fn new() -> AbMuCalc {
+        AbMuCalc {
+            distance: [0; 4],
+            past_direct: Direction::Init,
+            corrent_direct: Direction::Init,
+        }
+    }
+
+    pub fn calc_repetition(
+        &mut self,
+        dist: u16,
+        tx: &mut stm32f4xx_hal::serial::Tx<stm32f4xx_hal::stm32::USART2>,
+    ) -> bool {
+        // calc direction
+        for i in 0..self.distance.len() {
+            if i < self.distance.len() - 1 {
+                self.distance[i] = self.distance[i + 1];
+            } else {
+                self.distance[i] = dist;
+            }
+        }
+
+        // difference
+        let mut push_count = 0;
+        let mut pull_count = 0;
+        for i in 0..(self.distance.len() - 1) {
+            if self.distance[i] > self.distance[i + 1] {
+                push_count += 1;
+            } else {
+                pull_count += 1;
+            }
+        }
+        // judge
+        if push_count == 3 {
+            self.corrent_direct = Direction::Push;
+        } else if pull_count == 3 {
+            self.corrent_direct = Direction::Pull;
+        }
+        let ret = match (self.past_direct, self.corrent_direct) {
+            (Direction::Push, Direction::Pull) => true,
+            _ => false,
+        };
+
+        writeln!(
+            tx,
+            "distance: {:?} mm past_direct:{} corrent_direct:{} \r",
+            self.distance, self.past_direct, self.corrent_direct
+        )
+        .unwrap();
+
+        self.past_direct = self.corrent_direct;
+        ret
     }
 }
 
@@ -120,7 +181,8 @@ fn main() -> ! {
     let black_backdrop = Rectangle::new(Point::new(0, 0), Point::new(160, 128)).into_styled(style);
     black_backdrop.draw(&mut disp).unwrap();
 
-    let black_count_area = Rectangle::new(Point::new(96, 0), Point::new(160, 32)).into_styled(style);
+    let black_count_area =
+        Rectangle::new(Point::new(96, 0), Point::new(160, 32)).into_styled(style);
 
     //set up I2C
     let scl = gpiob.pb6.into_alternate_af4_open_drain();
@@ -141,56 +203,25 @@ fn main() -> ! {
     .unwrap();
     let (mut tx, mut _rx) = serial.split();
 
-    writeln!(&mut tx, "this is {} example!", "ToF").unwrap();
+    writeln!(&mut tx, "{}!", "Abdominal muscle roller meter").unwrap();
 
+    let mut abmucalc = AbMuCalc::new();
     let mut repetition = 0;
-    let mut distance: [u16; 4] = [0; 4];
-    let mut past_direct = Direction::Init;
-    let mut corrent_direct = Direction::Init;
 
     loop {
         // get dist data
         let dist = VL53L0x::read_range_single_millimeters_blocking(&mut tof).unwrap();
-        for i in 0..4 {
-            if i < 4 - 1 {
-                distance[i] = distance[i + 1];
-            } else {
-                distance[i] = dist;
-            }
-        }
 
-        // calc direction
-        // difference
-        let mut push_count = 0;
-        let mut pull_count = 0;
-        for i in 0..(4 - 1) {
-            if distance[i] > distance[i + 1] {
-                push_count += 1;
-            } else {
-                pull_count += 1;
-            }
-        }
-        // judge
-        if push_count == 3 {
-            corrent_direct = Direction::Push;
-        } else if pull_count == 3 {
-            corrent_direct = Direction::Pull;
-        }
-        match (past_direct, corrent_direct) {
-            (Direction::Push, Direction::Pull) => {
+        // calc repetition
+        match abmucalc.calc_repetition(dist, &mut tx) {
+            true => {
                 repetition += 1;
                 black_count_area.draw(&mut disp).unwrap();
             }
-            _ => (),
-        }
+            false => (),
+        };
 
-        writeln!(
-            tx,
-            "distance: {:?} mm past_direct:{} corrent_direct:{} rep:{}  \r",
-            distance, past_direct, corrent_direct, repetition
-        )
-        .unwrap();
-
+        // draw to LCD
         let mut textbuffer: String<8> = String::new();
         write!(&mut textbuffer, "rep:{}", repetition).unwrap();
         egtext!(
@@ -201,8 +232,6 @@ fn main() -> ! {
         .draw(&mut disp)
         .unwrap();
 
-        
-        delay.delay_ms(500_u16);
-        past_direct = corrent_direct;
+        delay.delay_ms(50_u16);
     }
 }
