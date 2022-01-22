@@ -118,13 +118,7 @@ fn main() -> ! {
     let gpioc = dp.GPIOC.split();
     // init clock object
     let rcc = dp.RCC.constrain();
-    //let clocks = rcc.cfgr.use_hse(8.mhz()).freeze();
-    let clocks = rcc
-        .cfgr
-        .use_hse(8.mhz())
-        .sysclk(72.mhz())
-        .pclk1(36.mhz())
-        .freeze();
+    let clocks = rcc.cfgr.sysclk(84.mhz()).pclk1(42.mhz()).freeze();
     // init delay object
     let mut delay = hal::delay::Delay::new(cp.SYST, clocks);
 
@@ -153,7 +147,6 @@ fn main() -> ! {
             phase: Phase::CaptureOnFirstTransition,
         },
         16_000_000.hz(),
-        //8_000_000.hz(),
         clocks,
     );
 
@@ -232,6 +225,5 @@ fn main() -> ! {
         .draw(&mut disp)
         .unwrap();
 
-        delay.delay_ms(50_u16);
     }
 }
