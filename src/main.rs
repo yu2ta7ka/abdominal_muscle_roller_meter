@@ -3,15 +3,15 @@
 
 use panic_halt as _;
 
+use cortex_m;
+use cortex_m::interrupt::{free, Mutex};
 use cortex_m_rt::entry;
+
 use stm32f4xx_hal as hal;
-
 use crate::hal::{
-    gpio::*, i2c::I2c, prelude::*, serial::config::Config, serial::Serial, spi::*, stm32,
+    gpio::*, i2c::I2c, prelude::*, serial::config::Config, serial::Serial, spi::*, stm32,stm32::interrupt,timer::{Event,Timer}
 };
-
 use core::fmt::Write; // for pretty formatting of the serial output
-use vl53l0x::VL53L0x;
 
 use embedded_graphics::egtext;
 use embedded_graphics::fonts::*;
@@ -25,6 +25,25 @@ use embedded_graphics::text_style;
 use heapless::String;
 use st7735_lcd;
 use st7735_lcd::Orientation;
+use vl53l0x::VL53L0x;
+
+use core::cell::RefCell;
+use core::ops::DerefMut;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+
+static TIMER_TIM2: Mutex<RefCell<Option<Timer<stm32::TIM2>>>> = Mutex::new(RefCell::new(None));
+static COUNTER: AtomicUsize = AtomicUsize::new(0);
+#[interrupt]
+fn TIM2() {
+    free(|cs| {
+        if let Some(ref mut tim2) = TIMER_TIM2.borrow(cs).borrow_mut().deref_mut() {
+            // Clears interrupt associated with event.
+            tim2.clear_interrupt(Event::TimeOut);
+        }
+        COUNTER.fetch_add(1, Ordering::Relaxed);
+    });
+}
 
 #[derive(Copy, Clone)]
 enum Direction {
@@ -112,33 +131,36 @@ fn main() -> ! {
     let dp = stm32::Peripherals::take().unwrap();
     let cp = cortex_m::peripheral::Peripherals::take().unwrap();
 
-    // init GPIO object
     let gpioa = dp.GPIOA.split();
     let gpiob = dp.GPIOB.split();
     let gpioc = dp.GPIOC.split();
-    // init clock object
     let rcc = dp.RCC.constrain();
     let clocks = rcc.cfgr.sysclk(84.mhz()).pclk1(42.mhz()).freeze();
-    // init delay object
     let mut delay = hal::delay::Delay::new(cp.SYST, clocks);
 
+    // Set up the interrupt timer
+    // Generates an interrupt at 1 milli second intervals.
+    
+    let mut timer = Timer::tim2(dp.TIM2, 1000.hz(), clocks);
+    timer.listen(Event::TimeOut);
+    // Move the ownership of the period_timer to global.
+    free(|cs| {
+        TIMER_TIM2.borrow(cs).replace(Some(timer));
+    });
+    // Enable interrupt
+    stm32::NVIC::unpend(stm32::Interrupt::TIM2);
+    unsafe {
+        stm32::NVIC::unmask(stm32::Interrupt::TIM2);
+    }
+
+    // LCD setting
     // for SPI communication
-    // PA5 connects to SCL/SCK on the LCD
     let sck = gpioa.pa5.into_alternate_af5();
-    // PA6 does not get connected to the LCD
     let miso = gpioa.pa6.into_alternate_af5();
-    // PA7 connects to SDA/MOSI on the LCD
     let mosi = gpioa.pa7.into_alternate_af5();
-    // GND connects to CS. Therefore, no code is reuired.
-
-    // PC0 connects to RST/RES on the LCD
     let rst = gpioc.pc0.into_push_pull_output();
-    // PB0 connects to RS/DC on the LCD
     let dc = gpiob.pb0.into_push_pull_output();
-
-    /* Notice this board is communicating over SPI_1. If it was some other SPI,
-    the pins would be different depending on the alternate functions. The alternate
-    function group could also end up being some number other than 5. */
+    // GND connects to CS. Therefore, no code is reuired.
     let spi = Spi::spi1(
         dp.SPI1,
         (sck, miso, mosi),
@@ -150,43 +172,27 @@ fn main() -> ! {
         clocks,
     );
 
-    /* Remember the change the width and height to match your LCD screen.
-    The RGB parameter specifies whether the LCD screen uses RGB or BGR for
-    color. Your LCD might vary so if you find your blues are reds or vice
-    versa change this parameter. */
-    //let mut disp = st7735_lcd::ST7735::new(spi, dc, rst, false, false, 128, 128);
+    // display setting
     let mut disp = st7735_lcd::ST7735::new(spi, dc, rst, true, false, 160, 128);
-
-    // Initialize the display.
     disp.init(&mut delay).unwrap();
-    // Set the orientation of the display
     disp.set_orientation(&Orientation::Landscape).unwrap();
-
-    /* Create a style that specifies a color of RED. This will always use
-    Rgb565 regardless if your board uses RGB or BGR. */
-    //let style = PrimitiveStyleBuilder::new().fill_color(Rgb565::RED).build();
     let style = PrimitiveStyleBuilder::new()
         .fill_color(Rgb565::BLACK)
         .build();
-
-    /* Create a rectangle to fill the background. Make sure the second point
-    has a width and height that matches your ST7735. */
     let black_backdrop = Rectangle::new(Point::new(0, 0), Point::new(160, 128)).into_styled(style);
     black_backdrop.draw(&mut disp).unwrap();
-
     let black_count_area =
         Rectangle::new(Point::new(96, 0), Point::new(160, 32)).into_styled(style);
 
-    //set up I2C
+    // ToF sensor setting
     let scl = gpiob.pb6.into_alternate_af4_open_drain();
     let sda = gpiob.pb7.into_alternate_af4_open_drain();
     let i2c = I2c::i2c1(dp.I2C1, (scl, sda), 400.khz(), clocks);
     let mut tof = VL53L0x::new(i2c).unwrap();
 
-    // define RX/TX pins
+    // Serial communication setting
     let tx_pin = gpioa.pa2.into_alternate_af7();
     let rx_pin = gpioa.pa3.into_alternate_af7();
-    // configure serial
     let serial = Serial::usart2(
         dp.USART2,
         (tx_pin, rx_pin),
@@ -202,6 +208,7 @@ fn main() -> ! {
     let mut repetition = 0;
 
     loop {
+        let start_count = COUNTER.load(Ordering::Relaxed);
         // get dist data
         let dist = VL53L0x::read_range_single_millimeters_blocking(&mut tof).unwrap();
 
@@ -225,5 +232,7 @@ fn main() -> ! {
         .draw(&mut disp)
         .unwrap();
 
+        let draw_lcd_count = COUNTER.load(Ordering::Relaxed);
+        writeln!(tx, "loop time {}ms\r", draw_lcd_count - start_count).unwrap();
     }
 }
