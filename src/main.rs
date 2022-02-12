@@ -64,8 +64,10 @@ impl core::fmt::Display for Direction {
     }
 }
 
+const DIST_SIZE:usize = 10;
+
 pub struct AbMuCalc {
-    distance: [u16; 4],
+    distance: [u16; DIST_SIZE],
     past_direct: Direction,
     corrent_direct: Direction,
 }
@@ -73,7 +75,7 @@ pub struct AbMuCalc {
 impl AbMuCalc {
     pub fn new() -> AbMuCalc {
         AbMuCalc {
-            distance: [0; 4],
+            distance: [0; DIST_SIZE],
             past_direct: Direction::Init,
             corrent_direct: Direction::Init,
         }
@@ -104,9 +106,9 @@ impl AbMuCalc {
             }
         }
         // judge
-        if push_count == 3 {
+        if push_count == self.distance.len() - 1 {
             self.corrent_direct = Direction::Push;
-        } else if pull_count == 3 {
+        } else if pull_count == self.distance.len() - 1 {
             self.corrent_direct = Direction::Pull;
         }
         let ret = match (self.past_direct, self.corrent_direct) {
@@ -114,12 +116,15 @@ impl AbMuCalc {
             _ => false,
         };
 
+        /* 
+        // Debug
         writeln!(
             tx,
             "distance: {:?} mm past_direct:{} corrent_direct:{} \r",
             self.distance, self.past_direct, self.corrent_direct
         )
         .unwrap();
+        */
 
         self.past_direct = self.corrent_direct;
         ret
@@ -140,7 +145,6 @@ fn main() -> ! {
 
     // Set up the interrupt timer
     // Generates an interrupt at 1 milli second intervals.
-    
     let mut timer = Timer::tim2(dp.TIM2, 1000.hz(), clocks);
     timer.listen(Event::TimeOut);
     // Move the ownership of the period_timer to global.
@@ -208,9 +212,10 @@ fn main() -> ! {
     let mut repetition = 0;
 
     loop {
-        let start_count = COUNTER.load(Ordering::Relaxed);
+        let start_time = COUNTER.load(Ordering::Relaxed);
         // get dist data
         let dist = VL53L0x::read_range_single_millimeters_blocking(&mut tof).unwrap();
+        let get_dist_time = COUNTER.load(Ordering::Relaxed);
 
         // calc repetition
         match abmucalc.calc_repetition(dist, &mut tx) {
@@ -220,6 +225,7 @@ fn main() -> ! {
             }
             false => (),
         };
+        let calc_rep_time = COUNTER.load(Ordering::Relaxed);
 
         // draw to LCD
         let mut textbuffer: String<8> = String::new();
@@ -231,8 +237,11 @@ fn main() -> ! {
         )
         .draw(&mut disp)
         .unwrap();
+        let draw_lcd_time = COUNTER.load(Ordering::Relaxed);
 
-        let draw_lcd_count = COUNTER.load(Ordering::Relaxed);
-        writeln!(tx, "loop time {}ms\r", draw_lcd_count - start_count).unwrap();
+        writeln!(tx, "loop time     {}ms\r", draw_lcd_time - start_time).unwrap();
+        writeln!(tx, "get dist time {}ms\r", get_dist_time - start_time).unwrap();
+        writeln!(tx, "calc rep time {}ms\r", calc_rep_time - get_dist_time).unwrap();
+        writeln!(tx, "draw lcd time {}ms\r", draw_lcd_time - calc_rep_time).unwrap();
     }
 }
