@@ -58,7 +58,6 @@ enum Direction {
     Init,
     Push,
     Pull,
-    Rest,
 }
 
 impl core::fmt::Display for Direction {
@@ -67,19 +66,23 @@ impl core::fmt::Display for Direction {
             Direction::Init => write!(f, "Init"),
             Direction::Push => write!(f, "Push"),
             Direction::Pull => write!(f, "Pull"),
-            Direction::Rest => write!(f, "Rest"),
         }
     }
 }
 
+const LCD_WIDTH: u32 = 160;
+const LCD_HIGHT: u32 = 128;
+
 const DIST_SIZE: usize = 10;
+const START_DIST_MAX: u16 = 1300; // Distance with the abdominal muscles shrinked. Starting position.
+const END_DIST_MIN: u16 = 0; // Distance with the abdominal muscles extended. End position.
 
 pub struct AbMuCalc {
     distance: [u16; DIST_SIZE],
     past_direct: Direction,
     corrent_direct: Direction,
-    shrink_dist: u16,
-    extend_dist: u16,
+    start_dist: u16,
+    end_dist: u16,
 }
 
 impl AbMuCalc {
@@ -88,8 +91,8 @@ impl AbMuCalc {
             distance: [0; DIST_SIZE],
             past_direct: Direction::Init,
             corrent_direct: Direction::Init,
-            shrink_dist: core::u16::MAX,
-            extend_dist: 0,
+            start_dist: START_DIST_MAX,
+            end_dist: END_DIST_MIN,
         }
     }
 
@@ -98,8 +101,8 @@ impl AbMuCalc {
         dist: u16,
         tx: &mut stm32f4xx_hal::serial::Tx<stm32f4xx_hal::stm32::USART2>,
     ) -> bool {
-        // calc direction
         for i in 0..self.distance.len() {
+            // deleted oldest distance[0], added latest distance[9]
             if i < self.distance.len() - 1 {
                 self.distance[i] = self.distance[i + 1];
             } else {
@@ -107,57 +110,60 @@ impl AbMuCalc {
             }
         }
 
-        // difference
         let mut push_count = 0;
         let mut pull_count = 0;
         for i in 0..(self.distance.len() - 1) {
+            // The direction is counted from the difference in distance.
             if self.distance[i] > self.distance[i + 1] {
                 push_count += 1;
             } else {
                 pull_count += 1;
             }
-        }
 
-        // if direct is push, update shrink_dist
-        if push_count == self.distance.len() - 1 {
-            if self.distance[0] < self.shrink_dist {
-                self.shrink_dist = self.distance[0];
+            // If it is outside the measurement distance range, repeticion is not calculated.
+            if self.distance[i] > START_DIST_MAX {
+                self.start_dist = START_DIST_MAX;
+                self.end_dist = END_DIST_MIN;
+                self.past_direct = Direction::Init;
+                self.corrent_direct = Direction::Init;
+                return false;
             }
         }
 
-        // if direct is push, update shrink_dist
-        if pull_count == self.distance.len() - 1 {
-            if self.distance[self.distance.len() - 1] > self.extend_dist {
-                self.extend_dist = self.distance[self.distance.len() - 1];
-            }
-        }
-
-        // I want to measure strength
-        let diff_dist = if self.extend_dist > self.shrink_dist {
-            self.extend_dist - self.shrink_dist
-        } else {
-            0
-        };
-
-        // judge
+        // Judgment of direction
         if push_count == self.distance.len() - 1 {
             self.corrent_direct = Direction::Push;
         } else if pull_count == self.distance.len() - 1 {
             self.corrent_direct = Direction::Pull;
         }
+        // Judgment of REP
         let ret = match (self.past_direct, self.corrent_direct) {
-            (Direction::Push, Direction::Pull) => true,
+            (Direction::Init, Direction::Push) => {
+                self.start_dist = self.distance[0];
+                false
+            }
+            (Direction::Push, Direction::Pull) => {
+                self.end_dist = self.distance[0];
+                true
+            }
             _ => false,
         };
 
+        // Strength judgment information (moving distance)
+        let diff_dist = if self.end_dist < self.start_dist {
+            self.start_dist - self.end_dist
+        } else {
+            0
+        };
+
         // Debug
-        /*        writeln!(
+        writeln!(
                     tx,
                     "s_d:{} e_d:{} diff:{} distance: {:?} mm push_count:{} pull_count:{} past_direct:{} corrent_direct:{} \r",
-                    self.shrink_dist, self.extend_dist, diff_dist, self.distance, push_count, pull_count, self.past_direct, self.corrent_direct
+                    self.start_dist, self.end_dist, diff_dist, self.distance, push_count, pull_count, self.past_direct, self.corrent_direct
                 )
                 .unwrap();
-        */
+
         self.past_direct = self.corrent_direct;
         ret
     }
@@ -209,19 +215,25 @@ fn main() -> ! {
     );
 
     // display setting
-    let mut disp = st7735_lcd::ST7735::new(spi, dc, rst, true, false, 160, 128);
+    let mut disp = st7735_lcd::ST7735::new(spi, dc, rst, true, false, LCD_WIDTH, LCD_HIGHT);
     disp.init(&mut delay).unwrap();
     disp.set_orientation(&Orientation::Landscape).unwrap();
     let style = PrimitiveStyleBuilder::new()
         .fill_color(Rgb565::BLACK)
         .build();
-    let black_backdrop = Rectangle::new(Point::new(0, 0), Point::new(160, 128)).into_styled(style);
+    let black_backdrop = Rectangle::new(
+        Point::new(0, 0),
+        Point::new(LCD_WIDTH as i32, LCD_HIGHT as i32),
+    )
+    .into_styled(style);
     black_backdrop.draw(&mut disp).unwrap();
-    let black_count_area =
-        Rectangle::new(Point::new(96, 0), Point::new(160, 32)).into_styled(style);
 
+    let black_count_area =
+        Rectangle::new(Point::new(96, 0), Point::new(LCD_WIDTH as i32, 32)).into_styled(style);
+
+    // Debug
     let dist_black_count_area =
-        Rectangle::new(Point::new(0, 40), Point::new(160, 72)).into_styled(style);
+        Rectangle::new(Point::new(0, 40), Point::new(LCD_WIDTH as i32, 72)).into_styled(style);
 
     // ToF sensor setting
     let scl = gpiob.pb6.into_alternate_af4_open_drain();
@@ -282,6 +294,7 @@ fn main() -> ! {
         };
         let calc_rep_time = COUNTER.load(Ordering::Relaxed);
 
+        /*
         // calc radius
         let mut radius: f32 = 48.0;
         if dist < 1000 {
@@ -298,8 +311,8 @@ fn main() -> ! {
             .into_styled(PrimitiveStyle::with_fill(Rgb565::RED))
             .draw(&mut disp)
             .unwrap();
+        */
 
-        /*
         // Debug
         // draw dist
         dist_black_count_area.draw(&mut disp).unwrap();
@@ -312,7 +325,7 @@ fn main() -> ! {
         )
         .draw(&mut disp)
         .unwrap();
-
+        /*
         // draw radius
         dist_black_count_area.draw(&mut disp).unwrap();
         let mut textbuffer: String<8> = String::new();
