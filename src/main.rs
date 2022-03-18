@@ -206,11 +206,29 @@ impl AbMuCalc {
         }
 
         // Judgment of direction
-        if push_count == self.distance.len() - 1 {
-            self.current_direct = Direction::Push;
-        } else if pull_count == self.distance.len() - 1 {
-            self.current_direct = Direction::Pull;
-        }
+        match self.current_direct {
+            Direction::Ready => {
+                if push_count == self.distance.len() - 1 {
+                    self.current_direct = Direction::Push;
+                }
+            }
+            Direction::Push => {
+                if push_count == self.distance.len() - 1 {
+                    self.current_direct = Direction::Push;
+                } else if pull_count == self.distance.len() - 1 {
+                    self.current_direct = Direction::Pull;
+                }
+            }
+            Direction::Pull => {
+                if push_count == self.distance.len() - 1 {
+                    self.current_direct = Direction::Push;
+                } else if pull_count == self.distance.len() - 1 {
+                    self.current_direct = Direction::Pull;
+                }
+            }
+            Direction::Init => (),
+        };
+
         // Judgment of REP
         match (self.past_direct, self.current_direct) {
             (Direction::Ready, Direction::Push) => {
@@ -411,7 +429,6 @@ fn main() -> ! {
         };
         let _calc_rep_time = COUNTER.load(Ordering::Relaxed);
 
-        
         // calc radius
         let mut radius: f32 = 48.0;
         if dist < START_DIST_MIN {
@@ -419,18 +436,26 @@ fn main() -> ! {
             radius *= rate;
         }
 
-        // draw red circle
+        // draw circle
+        let circle_color = match abmucalc.current_direct {
+            Direction::Init => Rgb565::YELLOW,
+            Direction::Ready => Rgb565::WHITE,
+            Direction::Push => Rgb565::BLUE,
+            Direction::Pull => Rgb565::RED,
+        };
         Circle::new(Point::new(80, 80), 48)
-            .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK,48 - radius as u32))
+            .into_styled(PrimitiveStyle::with_stroke(
+                Rgb565::BLACK,
+                48 - radius as u32,
+            ))
             .draw(&mut disp)
             .unwrap();
         Circle::new(Point::new(80, 80), radius as u32)
-            .into_styled(PrimitiveStyle::with_fill(Rgb565::RED))
+            .into_styled(PrimitiveStyle::with_fill(circle_color))
             .draw(&mut disp)
             .unwrap();
-        
 
-        
+        /*
         // Debug
         // draw dist
         _dist_black_count_area.draw(&mut disp).unwrap();
@@ -443,7 +468,7 @@ fn main() -> ! {
         )
         .draw(&mut disp)
         .unwrap();
-        
+        */
         /*
         // Debug
         // draw radius
