@@ -53,9 +53,24 @@ fn TIM2() {
     });
 }
 
+/*
+static TIMER_TIM5: Mutex<RefCell<Option<Timer<stm32::TIM5>>>> = Mutex::new(RefCell::new(None));
+#[interrupt]
+fn TIM5() {
+    free(|cs| {
+        if let Some(ref mut tim5) = TIMER_TIM5.borrow(cs).borrow_mut().deref_mut() {
+            // Clears interrupt associated with event.
+            tim5.clear_interrupt(Event::TimeOut);
+        }
+
+    });
+}
+*/
+
 #[derive(Copy, Clone)]
 enum Direction {
     Init,
+    Ready,
     Push,
     Pull,
 }
@@ -64,8 +79,50 @@ impl core::fmt::Display for Direction {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Direction::Init => write!(f, "Init"),
+            Direction::Ready => write!(f, "Ready"),
             Direction::Push => write!(f, "Push"),
             Direction::Pull => write!(f, "Pull"),
+        }
+    }
+}
+
+impl core::fmt::Debug for Direction {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Direction::Init => write!(f, "Init"),
+            Direction::Ready => write!(f, "Ready"),
+            Direction::Push => write!(f, "Push"),
+            Direction::Pull => write!(f, "Pull"),
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq)]
+enum StrengthJudgment {
+    Weak,
+    Medium,
+    Strong,
+    None,
+}
+
+impl core::fmt::Display for StrengthJudgment {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            StrengthJudgment::Weak => write!(f, "Weak"),
+            StrengthJudgment::Medium => write!(f, "Medium"),
+            StrengthJudgment::Strong => write!(f, "Strong"),
+            StrengthJudgment::None => write!(f, "None"),
+        }
+    }
+}
+
+impl core::fmt::Debug for StrengthJudgment {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            StrengthJudgment::Weak => write!(f, "Weak"),
+            StrengthJudgment::Medium => write!(f, "Medium"),
+            StrengthJudgment::Strong => write!(f, "Strong"),
+            StrengthJudgment::None => write!(f, "None"),
         }
     }
 }
@@ -73,16 +130,21 @@ impl core::fmt::Display for Direction {
 const LCD_WIDTH: u32 = 160;
 const LCD_HIGHT: u32 = 128;
 
-const DIST_SIZE: usize = 10;
-const START_DIST_MAX: u16 = 1300; // Distance with the abdominal muscles shrinked. Starting position.
+const DIST_SIZE: usize = 5;
+const START_DIST_MAX: u16 = 1300; // Distance with the abdominal muscles shrinked. Maximum starting position.
+const START_DIST_MIN: u16 = 1000; // Distance with the abdominal muscles shrinked. Minimum starting position.
 const END_DIST_MIN: u16 = 0; // Distance with the abdominal muscles extended. End position.
 
+#[derive(Debug)]
 pub struct AbMuCalc {
     distance: [u16; DIST_SIZE],
     past_direct: Direction,
-    corrent_direct: Direction,
+    current_direct: Direction,
     start_dist: u16,
     end_dist: u16,
+    start_time: usize,
+    strength: StrengthJudgment,
+    half_rep: bool,
 }
 
 impl AbMuCalc {
@@ -90,9 +152,12 @@ impl AbMuCalc {
         AbMuCalc {
             distance: [0; DIST_SIZE],
             past_direct: Direction::Init,
-            corrent_direct: Direction::Init,
+            current_direct: Direction::Init,
             start_dist: START_DIST_MAX,
             end_dist: END_DIST_MIN,
+            start_time: 0,
+            strength: StrengthJudgment::None,
+            half_rep: false,
         }
     }
 
@@ -100,7 +165,7 @@ impl AbMuCalc {
         &mut self,
         dist: u16,
         tx: &mut stm32f4xx_hal::serial::Tx<stm32f4xx_hal::stm32::USART2>,
-    ) -> bool {
+    ) {
         for i in 0..self.distance.len() {
             // deleted oldest distance[0], added latest distance[9]
             if i < self.distance.len() - 1 {
@@ -109,63 +174,96 @@ impl AbMuCalc {
                 self.distance[i] = dist;
             }
         }
+        // If it is outside the measurement distance range, repeticion is not calculated.
+        if self.distance[DIST_SIZE - 1] > START_DIST_MAX {
+            self.start_dist = START_DIST_MAX;
+            self.end_dist = END_DIST_MIN;
+            self.past_direct = Direction::Init;
+            self.current_direct = Direction::Init;
+            self.half_rep = false;
+            return;
+        } else if START_DIST_MIN < self.distance[DIST_SIZE - 1]
+            && self.distance[DIST_SIZE - 1] < START_DIST_MAX
+        {
+            self.current_direct = Direction::Ready;
+        }
 
         let mut push_count = 0;
         let mut pull_count = 0;
         for i in 0..(self.distance.len() - 1) {
             // The direction is counted from the difference in distance.
+
             if self.distance[i] > self.distance[i + 1] {
                 push_count += 1;
-            } else {
+            } else if self.distance[i] <= self.distance[i + 1] {
                 pull_count += 1;
             }
 
-            // If it is outside the measurement distance range, repeticion is not calculated.
-            if self.distance[i] > START_DIST_MAX {
-                self.start_dist = START_DIST_MAX;
-                self.end_dist = END_DIST_MIN;
-                self.past_direct = Direction::Init;
-                self.corrent_direct = Direction::Init;
-                return false;
-            }
+            self.start_time = match self.past_direct {
+                Direction::Ready => COUNTER.load(Ordering::Relaxed),
+                _ => self.start_time,
+            };
         }
 
         // Judgment of direction
         if push_count == self.distance.len() - 1 {
-            self.corrent_direct = Direction::Push;
+            self.current_direct = Direction::Push;
         } else if pull_count == self.distance.len() - 1 {
-            self.corrent_direct = Direction::Pull;
+            self.current_direct = Direction::Pull;
         }
         // Judgment of REP
-        let ret = match (self.past_direct, self.corrent_direct) {
-            (Direction::Init, Direction::Push) => {
+        match (self.past_direct, self.current_direct) {
+            (Direction::Ready, Direction::Push) => {
                 self.start_dist = self.distance[0];
-                false
             }
             (Direction::Push, Direction::Pull) => {
                 self.end_dist = self.distance[0];
-                true
+                self.half_rep = true;
             }
-            _ => false,
+            _ => (),
+        };
+        let end_time = if let Direction::Ready = self.current_direct {
+            if let Direction::Pull = self.past_direct {
+                COUNTER.load(Ordering::Relaxed)
+            } else {
+                core::usize::MAX
+            }
+        } else {
+            core::usize::MAX
         };
 
         // Strength judgment information (moving distance)
         let diff_dist = if self.end_dist < self.start_dist {
             self.start_dist - self.end_dist
         } else {
-            0
+            core::u16::MAX
         };
 
+        // Judgment of strength
+        if self.half_rep == true
+            && START_DIST_MIN < self.distance[DIST_SIZE - 1]
+            && self.distance[DIST_SIZE - 1] < START_DIST_MAX
+        {
+            // kokoni jikan no kyoudo jyouken mo jissou suru
+            if diff_dist <= 400 {
+                self.strength = StrengthJudgment::Weak;
+            } else if 400 < diff_dist && diff_dist <= 800 {
+                self.strength = StrengthJudgment::Medium;
+            } else if 800 < diff_dist && diff_dist <= START_DIST_MAX {
+                self.strength = StrengthJudgment::Strong;
+            }
+            self.half_rep = false;
+        } else {
+            self.strength = StrengthJudgment::None;
+        }
         // Debug
         writeln!(
-                    tx,
-                    "s_d:{} e_d:{} diff:{} distance: {:?} mm push_count:{} pull_count:{} past_direct:{} corrent_direct:{} \r",
-                    self.start_dist, self.end_dist, diff_dist, self.distance, push_count, pull_count, self.past_direct, self.corrent_direct
-                )
-                .unwrap();
+            tx,
+            "s_t:{} e_t:{} time:{} s_d:{} e_d:{} diff:{} dist: {:?} mm ps_cnt:{} pl_cnt:{} past_dire:{} corrent_dire:{} \r",
+            self.start_time, end_time,end_time - self.start_time, self.start_dist, self.end_dist, diff_dist, self.distance, push_count, pull_count, self.past_direct, self.current_direct
+        ).unwrap();
 
-        self.past_direct = self.corrent_direct;
-        ret
+        self.past_direct = self.current_direct;
     }
 }
 
@@ -194,6 +292,23 @@ fn main() -> ! {
     unsafe {
         stm32::NVIC::unmask(stm32::Interrupt::TIM2);
     }
+
+    /*
+     TODO: Use interrupt prcoessing from sensing ToF to calc REP.
+    // Set up the interrupt timer
+     // Generates an interrupt at 5 milli second intervals.
+     let mut timer5 = Timer::tim5(dp.TIM5, 500.hz(), clocks);
+     timer5.listen(Event::TimeOut);
+     // Move the ownership of the period_timer to global.
+     free(|cs| {
+         TIMER_TIM5.borrow(cs).replace(Some(timer5));
+     });
+     // Enable interrupt
+     stm32::NVIC::unpend(stm32::Interrupt::TIM5);
+     unsafe {
+         stm32::NVIC::unmask(stm32::Interrupt::TIM5);
+     }
+     */
 
     // LCD setting
     // for SPI communication
@@ -232,7 +347,7 @@ fn main() -> ! {
         Rectangle::new(Point::new(96, 0), Point::new(LCD_WIDTH as i32, 32)).into_styled(style);
 
     // Debug
-    let dist_black_count_area =
+    let _dist_black_count_area =
         Rectangle::new(Point::new(0, 40), Point::new(LCD_WIDTH as i32, 72)).into_styled(style);
 
     // ToF sensor setting
@@ -269,14 +384,17 @@ fn main() -> ! {
     let mut repetition = 0;
 
     loop {
-        let start_time = COUNTER.load(Ordering::Relaxed);
+        let _start_time = COUNTER.load(Ordering::Relaxed);
         // get dist data
         let dist = VL53L0x::read_range_single_millimeters_blocking(&mut tof).unwrap();
-        let get_dist_time = COUNTER.load(Ordering::Relaxed);
+        let _get_dist_time = COUNTER.load(Ordering::Relaxed);
 
         // calc repetition
-        match abmucalc.calc_repetition(dist, &mut tx) {
-            true => {
+        abmucalc.calc_repetition(dist, &mut tx);
+
+        match abmucalc.strength {
+            StrengthJudgment::None => (),
+            _ => {
                 repetition += 1;
                 black_count_area.draw(&mut disp).unwrap();
                 // draw to LCD
@@ -290,15 +408,14 @@ fn main() -> ! {
                 .draw(&mut disp)
                 .unwrap();
             }
-            false => (),
         };
-        let calc_rep_time = COUNTER.load(Ordering::Relaxed);
+        let _calc_rep_time = COUNTER.load(Ordering::Relaxed);
 
-        /*
+        
         // calc radius
         let mut radius: f32 = 48.0;
-        if dist < 1000 {
-            let rate = dist as f32 / 1000.0;
+        if dist < START_DIST_MIN {
+            let rate = dist as f32 / START_DIST_MIN as f32;
             radius *= rate;
         }
 
@@ -311,11 +428,12 @@ fn main() -> ! {
             .into_styled(PrimitiveStyle::with_fill(Rgb565::RED))
             .draw(&mut disp)
             .unwrap();
-        */
+        
 
+        
         // Debug
         // draw dist
-        dist_black_count_area.draw(&mut disp).unwrap();
+        _dist_black_count_area.draw(&mut disp).unwrap();
         let mut textbuffer: String<8> = String::new();
         write!(&mut textbuffer, "{}", dist).unwrap();
         egtext!(
@@ -325,7 +443,9 @@ fn main() -> ! {
         )
         .draw(&mut disp)
         .unwrap();
+        
         /*
+        // Debug
         // draw radius
         dist_black_count_area.draw(&mut disp).unwrap();
         let mut textbuffer: String<8> = String::new();
@@ -339,7 +459,7 @@ fn main() -> ! {
         .unwrap();
         */
 
-        let draw_lcd_time = COUNTER.load(Ordering::Relaxed);
+        let _draw_lcd_time = COUNTER.load(Ordering::Relaxed);
 
         // Debug
         //writeln!(tx, "loop time     {}ms\r", draw_lcd_time - start_time).unwrap();
