@@ -164,7 +164,7 @@ impl AbMuCalc {
     pub fn calc_repetition(
         &mut self,
         dist: u16,
-        tx: &mut stm32f4xx_hal::serial::Tx<stm32f4xx_hal::stm32::USART2>,
+        _tx: &mut stm32f4xx_hal::serial::Tx<stm32f4xx_hal::stm32::USART2>,
     ) {
         for i in 0..self.distance.len() {
             // deleted oldest distance[0], added latest distance[9]
@@ -274,9 +274,10 @@ impl AbMuCalc {
         } else {
             self.strength = StrengthJudgment::None;
         }
+
         // Debug
         writeln!(
-            tx,
+            _tx,
             "s_t:{} e_t:{} time:{} s_d:{} e_d:{} diff:{} dist: {:?} mm ps_cnt:{} pl_cnt:{} past_dire:{} corrent_dire:{} \r",
             self.start_time, end_time,end_time - self.start_time, self.start_dist, self.end_dist, diff_dist, self.distance, push_count, pull_count, self.past_direct, self.current_direct
         ).unwrap();
@@ -362,7 +363,7 @@ fn main() -> ! {
     black_backdrop.draw(&mut disp).unwrap();
 
     let black_count_area =
-        Rectangle::new(Point::new(96, 0), Point::new(LCD_WIDTH as i32, 32)).into_styled(style);
+        Rectangle::new(Point::new(0, 0), Point::new(LCD_WIDTH as i32, 32)).into_styled(style);
 
     // Debug
     let _dist_black_count_area =
@@ -389,7 +390,7 @@ fn main() -> ! {
     writeln!(&mut tx, "{}!", "Abdominal muscle roller meter").unwrap();
     // draw to LCD
     let mut textbuffer: String<8> = String::new();
-    write!(&mut textbuffer, "rep:0").unwrap();
+    write!(&mut textbuffer, "S0M0W0").unwrap();
     egtext!(
         text = textbuffer.as_str(),
         top_left = (0, 0),
@@ -399,7 +400,10 @@ fn main() -> ! {
     .unwrap();
 
     let mut abmucalc = AbMuCalc::new();
-    let mut repetition = 0;
+    let mut s_repetition = 0;
+    let mut m_repetition = 0;
+    let mut w_repetition = 0;
+    let mut circle_color = Rgb565::BLACK;
 
     loop {
         let _start_time = COUNTER.load(Ordering::Relaxed);
@@ -412,12 +416,25 @@ fn main() -> ! {
 
         match abmucalc.strength {
             StrengthJudgment::None => (),
+            StrengthJudgment::Strong => s_repetition += 1,
+
+            StrengthJudgment::Medium => m_repetition += 1,
+
+            StrengthJudgment::Weak => w_repetition += 1,
+        };
+
+        match abmucalc.strength {
+            StrengthJudgment::None => (),
             _ => {
-                repetition += 1;
                 black_count_area.draw(&mut disp).unwrap();
                 // draw to LCD
                 let mut textbuffer: String<8> = String::new();
-                write!(&mut textbuffer, "rep:{}", repetition).unwrap();
+                write!(
+                    &mut textbuffer,
+                    "S{}M{}W{}",
+                    s_repetition, m_repetition, w_repetition
+                )
+                .unwrap();
                 egtext!(
                     text = textbuffer.as_str(),
                     top_left = (0, 0),
@@ -427,6 +444,7 @@ fn main() -> ! {
                 .unwrap();
             }
         };
+
         let _calc_rep_time = COUNTER.load(Ordering::Relaxed);
 
         // calc radius
@@ -437,52 +455,41 @@ fn main() -> ! {
         }
 
         // draw circle
-        let circle_color = match abmucalc.current_direct {
+        let update_color = match abmucalc.current_direct {
             Direction::Init => Rgb565::YELLOW,
             Direction::Ready => Rgb565::WHITE,
             Direction::Push => Rgb565::BLUE,
             Direction::Pull => Rgb565::RED,
         };
-        Circle::new(Point::new(80, 80), 48)
-            .into_styled(PrimitiveStyle::with_stroke(
-                Rgb565::BLACK,
-                48 - radius as u32,
-            ))
-            .draw(&mut disp)
-            .unwrap();
-        Circle::new(Point::new(80, 80), radius as u32)
-            .into_styled(PrimitiveStyle::with_fill(circle_color))
-            .draw(&mut disp)
-            .unwrap();
 
-        /*
-        // Debug
-        // draw dist
-        _dist_black_count_area.draw(&mut disp).unwrap();
-        let mut textbuffer: String<8> = String::new();
-        write!(&mut textbuffer, "{}", dist).unwrap();
-        egtext!(
-            text = textbuffer.as_str(),
-            top_left = (0, 40),
-            style = text_style!(font = Font24x32, text_color = Rgb565::WHITE)
-        )
-        .draw(&mut disp)
-        .unwrap();
-        */
-        /*
-        // Debug
-        // draw radius
-        dist_black_count_area.draw(&mut disp).unwrap();
-        let mut textbuffer: String<8> = String::new();
-        write!(&mut textbuffer, "{}", radius as u32).unwrap();
-        egtext!(
-            text = textbuffer.as_str(),
-            top_left = (0, 40),
-            style = text_style!(font = Font24x32, text_color = Rgb565::WHITE)
-        )
-        .draw(&mut disp)
-        .unwrap();
-        */
+        if circle_color != update_color {
+            circle_color = update_color;
+            Circle::new(Point::new(80, 80), radius as u32)
+                .into_styled(PrimitiveStyle::with_fill(circle_color))
+                .draw(&mut disp)
+                .unwrap();
+            Circle::new(Point::new(80, 80), 48)
+                .into_styled(PrimitiveStyle::with_stroke(
+                    Rgb565::BLACK,
+                    48 - radius as u32,
+                ))
+                .draw(&mut disp)
+                .unwrap();
+
+            if circle_color == Rgb565::YELLOW || circle_color == Rgb565::WHITE {
+                // draw dist
+                _dist_black_count_area.draw(&mut disp).unwrap();
+                let mut textbuffer: String<8> = String::new();
+                write!(&mut textbuffer, "{}", dist).unwrap();
+                egtext!(
+                    text = textbuffer.as_str(),
+                    top_left = (0, 40),
+                    style = text_style!(font = Font24x32, text_color = Rgb565::WHITE)
+                )
+                .draw(&mut disp)
+                .unwrap();
+            }
+        }
 
         let _draw_lcd_time = COUNTER.load(Ordering::Relaxed);
 
@@ -490,6 +497,6 @@ fn main() -> ! {
         //writeln!(tx, "loop time     {}ms\r", draw_lcd_time - start_time).unwrap();
         //writeln!(tx, "get dist time {}ms\r", get_dist_time - start_time).unwrap();
         //writeln!(tx, "calc rep time {}ms\r", calc_rep_time - get_dist_time).unwrap();
-        //writeln!(tx, "draw lcd time {}ms\r", draw_lcd_time - calc_rep_time).unwrap();
+        //writeln!(tx, "draw lcd time {}ms\r", _draw_lcd_time - _calc_rep_time).unwrap();
     }
 }
