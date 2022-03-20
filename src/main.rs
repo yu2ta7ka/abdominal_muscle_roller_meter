@@ -180,29 +180,27 @@ impl AbMuCalc {
             self.end_dist = END_DIST_MIN;
             self.past_direct = Direction::Init;
             self.current_direct = Direction::Init;
+            self.strength = StrengthJudgment::None;
             self.half_rep = false;
             return;
         } else if START_DIST_MIN < self.distance[DIST_SIZE - 1]
             && self.distance[DIST_SIZE - 1] < START_DIST_MAX
         {
             self.current_direct = Direction::Ready;
+            if let Direction::Ready = self.past_direct {
+                self.start_time = COUNTER.load(Ordering::Relaxed);
+            }
         }
 
         let mut push_count = 0;
         let mut pull_count = 0;
         for i in 0..(self.distance.len() - 1) {
             // The direction is counted from the difference in distance.
-
             if self.distance[i] > self.distance[i + 1] {
                 push_count += 1;
             } else if self.distance[i] <= self.distance[i + 1] {
                 pull_count += 1;
             }
-
-            self.start_time = match self.past_direct {
-                Direction::Ready => COUNTER.load(Ordering::Relaxed),
-                _ => self.start_time,
-            };
         }
 
         // Judgment of direction
@@ -250,11 +248,16 @@ impl AbMuCalc {
             core::usize::MAX
         };
 
-        // Strength judgment information (moving distance)
+        // Strength judgment information
         let diff_dist = if self.end_dist < self.start_dist {
             self.start_dist - self.end_dist
         } else {
             core::u16::MAX
+        };
+        let once_time = if self.start_time < end_time {
+            end_time - self.start_time
+        } else {
+            core::usize::MAX
         };
 
         // Judgment of strength
@@ -262,26 +265,44 @@ impl AbMuCalc {
             && START_DIST_MIN < self.distance[DIST_SIZE - 1]
             && self.distance[DIST_SIZE - 1] < START_DIST_MAX
         {
-            // kokoni jikan no kyoudo jyouken mo jissou suru
-            if diff_dist <= 400 {
-                self.strength = StrengthJudgment::Weak;
+            let strength_dist = if diff_dist <= 400 {
+                1
             } else if 400 < diff_dist && diff_dist <= 800 {
-                self.strength = StrengthJudgment::Medium;
+                2
             } else if 800 < diff_dist && diff_dist <= START_DIST_MAX {
-                self.strength = StrengthJudgment::Strong;
-            }
+                3
+            } else {
+                10
+            };
+            let strength_time = if once_time <= 4000 {
+                1
+            } else if 4000 < once_time && once_time <= 7000 {
+                2
+            } else if 7001 < once_time {
+                3
+            } else {
+                100
+            };
+
+            self.strength = match strength_dist + strength_time {
+                2 | 3 => StrengthJudgment::Weak,
+                4 => StrengthJudgment::Medium,
+                5 | 6 => StrengthJudgment::Strong,
+                _ => StrengthJudgment::None,
+            };
             self.half_rep = false;
         } else {
             self.strength = StrengthJudgment::None;
         }
 
         // Debug
+        /*
         writeln!(
             _tx,
-            "s_t:{} e_t:{} time:{} s_d:{} e_d:{} diff:{} dist: {:?} mm ps_cnt:{} pl_cnt:{} past_dire:{} corrent_dire:{} \r",
-            self.start_time, end_time,end_time - self.start_time, self.start_dist, self.end_dist, diff_dist, self.distance, push_count, pull_count, self.past_direct, self.current_direct
+            "strg:{} s_t:{} e_t:{} time:{} s_d:{} e_d:{} diff:{} dist: {:?} mm ps_cnt:{} pl_cnt:{} past_dire:{} corrent_dire:{} \r",
+            self.strength, self.start_time, end_time, once_time, self.start_dist, self.end_dist, diff_dist, self.distance, push_count, pull_count, self.past_direct, self.current_direct
         ).unwrap();
-
+        */
         self.past_direct = self.current_direct;
     }
 }
@@ -441,6 +462,13 @@ fn main() -> ! {
                     style = text_style!(font = Font24x32, text_color = Rgb565::WHITE)
                 )
                 .draw(&mut disp)
+                .unwrap();
+
+                writeln!(
+                    tx,
+                    "update rep s{}m{}w{}\r",
+                    s_repetition, m_repetition, w_repetition
+                )
                 .unwrap();
             }
         };
